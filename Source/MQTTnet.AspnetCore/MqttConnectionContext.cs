@@ -148,7 +148,7 @@ public sealed class MqttConnectionContext : IMqttChannelAdapter
         _writerLock.Dispose();
     }
 
-    public async Task<MqttPacket> ReceivePacketAsync(CancellationToken cancellationToken)
+    public async ValueTask<MqttPacket> ReceivePacketAsync(CancellationToken cancellationToken)
     {
         try
         {
@@ -213,7 +213,7 @@ public sealed class MqttConnectionContext : IMqttChannelAdapter
         BytesSent = 0;
     }
 
-    public async Task SendPacketAsync(MqttPacket packet, CancellationToken cancellationToken)
+    public async ValueTask SendPacketAsync(MqttPacket packet, CancellationToken cancellationToken)
     {
         using (await _writerLock.EnterAsync(cancellationToken).ConfigureAwait(false))
         {

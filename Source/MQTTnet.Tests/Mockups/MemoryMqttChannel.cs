@@ -42,12 +42,12 @@ public sealed class MemoryMqttChannel : IMqttChannel
         return CompletedTask.Instance;
     }
 
-    public Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+    public ValueTask<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
     {
-        return _stream.ReadAsync(buffer, offset, count, cancellationToken);
+        return _stream.ReadAsync(buffer.AsMemory(offset, count), cancellationToken);
     }
 
-    public async Task WriteAsync(ReadOnlySequence<byte> buffer, bool isEndOfPacket, CancellationToken cancellationToken)
+    public async ValueTask WriteAsync(ReadOnlySequence<byte> buffer, bool isEndOfPacket, CancellationToken cancellationToken)
     {
         foreach (var segment in buffer)
         {

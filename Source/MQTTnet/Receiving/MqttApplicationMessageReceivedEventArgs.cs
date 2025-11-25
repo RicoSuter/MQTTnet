@@ -8,7 +8,7 @@ namespace MQTTnet;
 
 public sealed class MqttApplicationMessageReceivedEventArgs : EventArgs
 {
-    readonly Func<MqttApplicationMessageReceivedEventArgs, CancellationToken, Task> _acknowledgeHandler;
+    readonly Func<MqttApplicationMessageReceivedEventArgs, CancellationToken, ValueTask> _acknowledgeHandler;
 
     int _isAcknowledged;
 
@@ -16,7 +16,7 @@ public sealed class MqttApplicationMessageReceivedEventArgs : EventArgs
         string clientId,
         MqttApplicationMessage applicationMessage,
         MqttPublishPacket publishPacket,
-        Func<MqttApplicationMessageReceivedEventArgs, CancellationToken, Task> acknowledgeHandler)
+        Func<MqttApplicationMessageReceivedEventArgs, CancellationToken, ValueTask> acknowledgeHandler)
     {
         ClientId = clientId;
         ApplicationMessage = applicationMessage ?? throw new ArgumentNullException(nameof(applicationMessage));
@@ -73,7 +73,7 @@ public sealed class MqttApplicationMessageReceivedEventArgs : EventArgs
 
     internal MqttPublishPacket PublishPacket { get; set; }
 
-    public Task AcknowledgeAsync(CancellationToken cancellationToken)
+    public ValueTask AcknowledgeAsync(CancellationToken cancellationToken)
     {
         if (_acknowledgeHandler == null)
         {

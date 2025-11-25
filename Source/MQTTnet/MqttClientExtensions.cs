@@ -32,7 +32,7 @@ public static class MqttClientExtensions
         return client.DisconnectAsync(disconnectOptions, cancellationToken);
     }
 
-    public static Task<MqttClientPublishResult> PublishBinaryAsync(
+    public static ValueTask<MqttClientPublishResult> PublishBinaryAsync(
         this IMqttClient mqttClient,
         string topic,
         IEnumerable<byte> payload = null,
@@ -52,7 +52,7 @@ public static class MqttClientExtensions
         return mqttClient.PublishAsync(applicationMessage, cancellationToken);
     }
 
-    public static Task<MqttClientPublishResult> PublishSequenceAsync(
+    public static ValueTask<MqttClientPublishResult> PublishSequenceAsync(
         this IMqttClient mqttClient,
         string topic,
         ReadOnlySequence<byte> payload,
@@ -72,7 +72,7 @@ public static class MqttClientExtensions
         return mqttClient.PublishAsync(applicationMessage, cancellationToken);
     }
 
-    public static Task<MqttClientPublishResult> PublishStringAsync(
+    public static ValueTask<MqttClientPublishResult> PublishStringAsync(
         this IMqttClient mqttClient,
         string topic,
         string payload = null,
@@ -95,7 +95,7 @@ public static class MqttClientExtensions
         return client.ConnectAsync(client.Options, cancellationToken);
     }
 
-    public static Task SendEnhancedAuthenticationExchangeDataAsync(this IMqttClient client, MqttEnhancedAuthenticationExchangeData data)
+    public static ValueTask SendEnhancedAuthenticationExchangeDataAsync(this IMqttClient client, MqttEnhancedAuthenticationExchangeData data)
     {
         ArgumentNullException.ThrowIfNull(client);
 

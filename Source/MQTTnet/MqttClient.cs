@@ -241,7 +241,7 @@ public sealed class MqttClient : Disposable, IMqttClient
         }
     }
 
-    public Task<MqttClientPublishResult> PublishAsync(MqttApplicationMessage applicationMessage, CancellationToken cancellationToken = default)
+    public ValueTask<MqttClientPublishResult> PublishAsync(MqttApplicationMessage applicationMessage, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
 
@@ -278,7 +278,7 @@ public sealed class MqttClient : Disposable, IMqttClient
         }
     }
 
-    public Task SendEnhancedAuthenticationExchangeDataAsync(MqttEnhancedAuthenticationExchangeData data, CancellationToken cancellationToken = default)
+    public ValueTask SendEnhancedAuthenticationExchangeDataAsync(MqttEnhancedAuthenticationExchangeData data, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(data);
 
@@ -376,7 +376,7 @@ public sealed class MqttClient : Disposable, IMqttClient
         base.Dispose(disposing);
     }
 
-    Task AcknowledgeReceivedPublishPacket(MqttApplicationMessageReceivedEventArgs eventArgs, CancellationToken cancellationToken)
+    ValueTask AcknowledgeReceivedPublishPacket(MqttApplicationMessageReceivedEventArgs eventArgs, CancellationToken cancellationToken)
     {
         switch (eventArgs.PublishPacket.QualityOfServiceLevel)
         {
@@ -411,7 +411,7 @@ public sealed class MqttClient : Disposable, IMqttClient
             }
         }
 
-        return CompletedTask.Instance;
+        return ValueTask.CompletedTask;
     }
 
     async Task<MqttClientConnectResult> Authenticate(IMqttChannelAdapter channelAdapter, MqttClientOptions options, CancellationToken cancellationToken)
@@ -707,11 +707,11 @@ public sealed class MqttClient : Disposable, IMqttClient
         }
     }
 
-    Task ProcessReceivedPubRecPacket(MqttPubRecPacket pubRecPacket, CancellationToken cancellationToken)
+    ValueTask ProcessReceivedPubRecPacket(MqttPubRecPacket pubRecPacket, CancellationToken cancellationToken)
     {
         if (_packetDispatcher.TryDispatch(pubRecPacket))
         {
-            return CompletedTask.Instance;
+            return ValueTask.CompletedTask;
         }
 
         // The packet is unknown, probably due to a restart of the client.
@@ -720,13 +720,13 @@ public sealed class MqttClient : Disposable, IMqttClient
         return Send(pubRelPacket, cancellationToken);
     }
 
-    Task ProcessReceivedPubRelPacket(MqttPubRelPacket pubRelPacket, CancellationToken cancellationToken)
+    ValueTask ProcessReceivedPubRelPacket(MqttPubRelPacket pubRelPacket, CancellationToken cancellationToken)
     {
         var pubCompPacket = MqttPubCompPacketFactory.Create(pubRelPacket, MqttApplicationMessageReceivedReasonCode.Success);
         return Send(pubCompPacket, cancellationToken);
     }
 
-    async Task<MqttClientPublishResult> PublishAtLeastOnce(MqttPublishPacket publishPacket, CancellationToken cancellationToken)
+    async ValueTask<MqttClientPublishResult> PublishAtLeastOnce(MqttPublishPacket publishPacket, CancellationToken cancellationToken)
     {
         publishPacket.PacketIdentifier = _packetIdentifierProvider.GetNextPacketIdentifier();
 
@@ -734,7 +734,7 @@ public sealed class MqttClient : Disposable, IMqttClient
         return MqttClientPublishResultFactory.Create(pubAckPacket);
     }
 
-    async Task<MqttClientPublishResult> PublishAtMostOnce(MqttPublishPacket publishPacket, CancellationToken cancellationToken)
+    async ValueTask<MqttClientPublishResult> PublishAtMostOnce(MqttPublishPacket publishPacket, CancellationToken cancellationToken)
     {
         try
         {
@@ -759,7 +759,7 @@ public sealed class MqttClient : Disposable, IMqttClient
         }
     }
 
-    async Task<MqttClientPublishResult> PublishExactlyOnce(MqttPublishPacket publishPacket, CancellationToken cancellationToken)
+    async ValueTask<MqttClientPublishResult> PublishExactlyOnce(MqttPublishPacket publishPacket, CancellationToken cancellationToken)
     {
         publishPacket.PacketIdentifier = _packetIdentifierProvider.GetNextPacketIdentifier();
 
@@ -849,7 +849,7 @@ public sealed class MqttClient : Disposable, IMqttClient
         }
     }
 
-    async Task<TResponsePacket> Request<TResponsePacket>(MqttPacket requestPacket, CancellationToken cancellationToken) where TResponsePacket : MqttPacket
+    async ValueTask<TResponsePacket> Request<TResponsePacket>(MqttPacket requestPacket, CancellationToken cancellationToken) where TResponsePacket : MqttPacket
     {
         cancellationToken.ThrowIfCancellationRequested();
 
@@ -885,7 +885,7 @@ public sealed class MqttClient : Disposable, IMqttClient
         }
     }
 
-    Task Send(MqttPacket packet, CancellationToken cancellationToken)
+    ValueTask Send(MqttPacket packet, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
 

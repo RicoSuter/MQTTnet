@@ -196,7 +196,7 @@ public sealed class MqttTcpChannel : IMqttChannel
         }
     }
 
-    public async Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+    public async ValueTask<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
 
@@ -232,7 +232,7 @@ public sealed class MqttTcpChannel : IMqttChannel
         }
     }
 
-    public async Task WriteAsync(ReadOnlySequence<byte> buffer, bool isEndOfPacket, CancellationToken cancellationToken)
+    public async ValueTask WriteAsync(ReadOnlySequence<byte> buffer, bool isEndOfPacket, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
 

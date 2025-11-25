@@ -38,7 +38,7 @@ public static class PerformanceTest
                 stopwatch.Restart();
                 while (stopwatch.ElapsedMilliseconds < 1000)
                 {
-                    client.PublishAsync(message).GetAwaiter().GetResult();
+                    client.PublishAsync(message).AsTask().GetAwaiter().GetResult();
                     sentMessagesCount++;
                 }
 
@@ -203,7 +203,7 @@ public static class PerformanceTest
     static Task<MqttClientPublishResult> PublishSingleMessage(IMqttClient client, MqttApplicationMessage applicationMessage, ref int count)
     {
         Interlocked.Increment(ref count);
-        return Task.Run(() => client.PublishAsync(applicationMessage));
+        return Task.Run(async () => await client.PublishAsync(applicationMessage).ConfigureAwait(false));
     }
 
     public static async Task RunQoS2Test()

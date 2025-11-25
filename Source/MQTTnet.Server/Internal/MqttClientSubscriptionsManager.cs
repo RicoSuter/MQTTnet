@@ -40,9 +40,12 @@ public sealed class MqttClientSubscriptionsManager : IDisposable
         _subscriptionChangedNotification = subscriptionChangedNotification;
     }
 
+    [ThreadStatic] static List<MqttSubscription> _possibleSubscriptions;
+
     public CheckSubscriptionsResult CheckSubscriptions(string topic, ulong topicHash, MqttQualityOfServiceLevel qualityOfServiceLevel, string senderId)
     {
-        var possibleSubscriptions = new List<MqttSubscription>();
+        var possibleSubscriptions = _possibleSubscriptions ??= new List<MqttSubscription>(16);
+        possibleSubscriptions.Clear();
 
         // Check for possible subscriptions. They might have collisions but this is fine.
         _subscriptionsLock.EnterReadLock();

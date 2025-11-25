@@ -83,7 +83,7 @@ public class MqttEnhancedAuthenticationEventArgs : EventArgs
         throw new MqttProtocolViolationException("Received other packet than AUTH while authenticating.");
     }
 
-    public Task SendAsync(SendMqttEnhancedAuthenticationDataOptions options, CancellationToken cancellationToken = default)
+    public ValueTask SendAsync(SendMqttEnhancedAuthenticationDataOptions options, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(options);
 

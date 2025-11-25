@@ -93,13 +93,13 @@ public sealed class MqttWebSocketChannel : IMqttChannel
         Cleanup();
     }
 
-    public async Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+    public async ValueTask<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
     {
         var response = await _webSocket.ReceiveAsync(new ArraySegment<byte>(buffer, offset, count), cancellationToken).ConfigureAwait(false);
         return response.Count;
     }
 
-    public async Task WriteAsync(ReadOnlySequence<byte> buffer, bool isEndOfPacket, CancellationToken cancellationToken)
+    public async ValueTask WriteAsync(ReadOnlySequence<byte> buffer, bool isEndOfPacket, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
 

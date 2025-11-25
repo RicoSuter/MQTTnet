@@ -131,7 +131,7 @@ public sealed class MqttChannelAdapter : Disposable, IMqttChannelAdapter
         }
     }
 
-    public async Task<MqttPacket> ReceivePacketAsync(CancellationToken cancellationToken)
+    public async ValueTask<MqttPacket> ReceivePacketAsync(CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         ThrowIfDisposed();
@@ -201,7 +201,7 @@ public sealed class MqttChannelAdapter : Disposable, IMqttChannelAdapter
         _statistics.Reset();
     }
 
-    public async Task SendPacketAsync(MqttPacket packet, CancellationToken cancellationToken)
+    public async ValueTask SendPacketAsync(MqttPacket packet, CancellationToken cancellationToken)
     {
         ThrowIfDisposed();
 
@@ -262,7 +262,7 @@ public sealed class MqttChannelAdapter : Disposable, IMqttChannelAdapter
         base.Dispose(disposing);
     }
 
-    async Task<int> ReadBodyLengthAsync(byte initialEncodedByte, CancellationToken cancellationToken)
+    async ValueTask<int> ReadBodyLengthAsync(byte initialEncodedByte, CancellationToken cancellationToken)
     {
         var offset = 0;
         var multiplier = 128;
@@ -374,7 +374,7 @@ public sealed class MqttChannelAdapter : Disposable, IMqttChannelAdapter
         };
     }
 
-    async Task<ReceivedMqttPacket> ReceiveAsync(CancellationToken cancellationToken)
+    async ValueTask<ReceivedMqttPacket> ReceiveAsync(CancellationToken cancellationToken)
     {
         if (cancellationToken.IsCancellationRequested)
         {

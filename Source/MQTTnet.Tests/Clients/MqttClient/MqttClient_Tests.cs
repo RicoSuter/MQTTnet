@@ -55,7 +55,9 @@ public sealed class MqttClient_Tests : BaseTestClass
             return CompletedTask.Instance;
         };
 
-        var publishes = Task.WhenAll(publisher.PublishStringAsync("a", null, qos), publisher.PublishStringAsync("b", null, qos));
+        var publishes = Task.WhenAll(
+            publisher.PublishStringAsync("a", null, qos).AsTask(),
+            publisher.PublishStringAsync("b", null, qos).AsTask());
 
         await Task.Delay(200);
 

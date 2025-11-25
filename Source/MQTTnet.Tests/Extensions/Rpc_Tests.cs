@@ -53,7 +53,7 @@ public sealed class Rpc_Tests : BaseTestClass
         var responseSender = await testEnvironment.ConnectClient(new MqttClientOptionsBuilder());
         await responseSender.SubscribeAsync($"MQTTnet.RPC/+/ping/{paramValue}");
 
-        responseSender.ApplicationMessageReceivedAsync += e => responseSender.PublishStringAsync(e.ApplicationMessage.Topic + "/response", "pong");
+        responseSender.ApplicationMessageReceivedAsync += e => responseSender.PublishStringAsync(e.ApplicationMessage.Topic + "/response", "pong").AsTask();
 
         using var rpcClient = await testEnvironment.ConnectRpcClient(new MqttRpcClientOptionsBuilder()
             .WithTopicGenerationStrategy(new TestParametersTopicGenerationStrategy()).Build());

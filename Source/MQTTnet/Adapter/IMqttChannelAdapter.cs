@@ -29,9 +29,9 @@ public interface IMqttChannelAdapter : IDisposable
 
     Task DisconnectAsync(CancellationToken cancellationToken);
 
-    Task<MqttPacket> ReceivePacketAsync(CancellationToken cancellationToken);
+    ValueTask<MqttPacket> ReceivePacketAsync(CancellationToken cancellationToken);
 
     void ResetStatistics();
 
-    Task SendPacketAsync(MqttPacket packet, CancellationToken cancellationToken);
+    ValueTask SendPacketAsync(MqttPacket packet, CancellationToken cancellationToken);
 }
