@@ -101,20 +101,17 @@ public sealed class MqttPacketBus : IDisposable
         while (!cancellationToken.IsCancellationRequested)
         {
             var count = 0;
-
             lock (_syncRoot)
             {
                 // Dequeue up to maxCount items, cycling through partitions to maintain fairness
                 while (count < maxCount)
                 {
                     var foundAny = false;
-
                     for (var i = 0; i < 3 && count < maxCount; i++)
                     {
                         MoveActivePartition();
 
                         var activePartition = _partitions[_activePartition];
-
                         if (activePartition.TryDequeue(out var item))
                         {
                             buffer[count++] = item;

@@ -515,10 +515,7 @@ public sealed class MqttConnectedClient : IDisposable
 
                 try
                 {
-                    // Send all packets in a single batch operation
                     await ChannelAdapter.SendPacketsAsync(new ArraySegment<MqttPacket>(packetBuffer, 0, batchCount), cancellationToken).ConfigureAwait(false);
-
-                    // Mark all items as completed
                     for (var i = 0; i < batchCount; i++)
                     {
                         batchBuffer[i].Complete();

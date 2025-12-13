@@ -249,7 +249,6 @@ public sealed class MqttConnectionContext : IMqttChannelAdapter
             return;
         }
 
-        // Fast path for single packet
         if (packets.Count == 1)
         {
             await SendPacketAsync(packets.Array![packets.Offset], cancellationToken).ConfigureAwait(false);
@@ -261,8 +260,6 @@ public sealed class MqttConnectionContext : IMqttChannelAdapter
             try
             {
                 var totalLength = 0;
-
-                // Encode all packets and write to PipeWriter in sequence
                 for (var i = 0; i < packets.Count; i++)
                 {
                     var packet = packets.Array![packets.Offset + i];
@@ -271,9 +268,7 @@ public sealed class MqttConnectionContext : IMqttChannelAdapter
                     totalLength += buffer.Length;
                 }
 
-                // Single flush for all packets
                 await _output.FlushAsync(cancellationToken).ConfigureAwait(false);
-
                 BytesSent += totalLength;
             }
             finally

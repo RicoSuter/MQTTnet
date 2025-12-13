@@ -299,13 +299,9 @@ public sealed class MqttChannelAdapter : Disposable, IMqttChannelAdapter
 
                     Buffer.BlockCopy(joined.Array!, joined.Offset, combinedBuffer, totalLength, packetLength);
                     totalLength += packetLength;
-
-                    _logger.Verbose("TX (batched, {0} bytes) >>> {1}", buffer.Length, packet);
                 }
 
-                // Single write for all packets
                 await _channel.WriteAsync(new ReadOnlySequence<byte>(new ReadOnlyMemory<byte>(combinedBuffer, 0, totalLength)), true, cancellationToken).ConfigureAwait(false);
-
                 Interlocked.Add(ref _statistics._bytesSent, totalLength);
             }
             catch (Exception exception)
