@@ -162,7 +162,7 @@ public sealed class MqttChannelAdapter : Disposable, IMqttChannelAdapter
                 await localPacketInspector.EndReceivePacket().ConfigureAwait(false);
             }
 
-            Interlocked.Add(ref _statistics._bytesSent, receivedPacket.TotalLength);
+            Interlocked.Add(ref _statistics._bytesReceived, receivedPacket.TotalLength);
 
             if (PacketFormatterAdapter.ProtocolVersion == MqttProtocolVersion.Unknown)
             {
@@ -235,7 +235,7 @@ public sealed class MqttChannelAdapter : Disposable, IMqttChannelAdapter
                     await _channel.WriteAsync(packetBuffer.Payload, true, cancellationToken).ConfigureAwait(false);
                 }
 
-                Interlocked.Add(ref _statistics._bytesReceived, packetBuffer.Length);
+                Interlocked.Add(ref _statistics._bytesSent, packetBuffer.Length);
             }
             catch (Exception exception)
             {
@@ -246,6 +246,78 @@ public sealed class MqttChannelAdapter : Disposable, IMqttChannelAdapter
             }
             finally
             {
+                PacketFormatterAdapter.Cleanup();
+            }
+        }
+    }
+
+    public async Task SendPacketsAsync(ArraySegment<MqttPacket> packets, CancellationToken cancellationToken)
+    {
+        if (packets.Count == 0)
+        {
+            return;
+        }
+
+        // Fast path for single packet
+        if (packets.Count == 1)
+        {
+            await SendPacketAsync(packets.Array![packets.Offset], cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        ThrowIfDisposed();
+
+        using (await _syncRoot.EnterAsync(cancellationToken).ConfigureAwait(false))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            // Estimate initial buffer size (average ~100 bytes per packet, with headroom)
+            var estimatedSize = Math.Max(packets.Count * 128, 4096);
+            var combinedBuffer = ArrayPool<byte>.Shared.Rent(estimatedSize);
+            var totalLength = 0;
+
+            try
+            {
+                for (var i = 0; i < packets.Count; i++)
+                {
+                    var packet = packets.Array![packets.Offset + i];
+                    var buffer = PacketFormatterAdapter.Encode(packet);
+
+                    // Copy packet bytes immediately before next Encode() overwrites the buffer
+                    var joined = buffer.Join();
+                    var packetLength = joined.Count;
+
+                    // Grow buffer if needed
+                    if (totalLength + packetLength > combinedBuffer.Length)
+                    {
+                        var newSize = Math.Max(combinedBuffer.Length * 2, totalLength + packetLength);
+                        var newBuffer = ArrayPool<byte>.Shared.Rent(newSize);
+                        Buffer.BlockCopy(combinedBuffer, 0, newBuffer, 0, totalLength);
+                        ArrayPool<byte>.Shared.Return(combinedBuffer);
+                        combinedBuffer = newBuffer;
+                    }
+
+                    Buffer.BlockCopy(joined.Array!, joined.Offset, combinedBuffer, totalLength, packetLength);
+                    totalLength += packetLength;
+
+                    _logger.Verbose("TX (batched, {0} bytes) >>> {1}", buffer.Length, packet);
+                }
+
+                // Single write for all packets
+                await _channel.WriteAsync(new ReadOnlySequence<byte>(new ReadOnlyMemory<byte>(combinedBuffer, 0, totalLength)), true, cancellationToken).ConfigureAwait(false);
+
+                Interlocked.Add(ref _statistics._bytesSent, totalLength);
+            }
+            catch (Exception exception)
+            {
+                if (!WrapAndThrowException(exception))
+                {
+                    throw;
+                }
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(combinedBuffer);
                 PacketFormatterAdapter.Cleanup();
             }
         }

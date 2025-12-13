@@ -34,4 +34,10 @@ public interface IMqttChannelAdapter : IDisposable
     void ResetStatistics();
 
     Task SendPacketAsync(MqttPacket packet, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Sends multiple packets in a single batch operation for improved throughput.
+    /// All packets are encoded and written to the socket in a single combined write.
+    /// </summary>
+    Task SendPacketsAsync(ArraySegment<MqttPacket> packets, CancellationToken cancellationToken);
 }

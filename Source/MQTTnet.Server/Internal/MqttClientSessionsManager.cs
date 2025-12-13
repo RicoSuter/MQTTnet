@@ -32,6 +32,10 @@ public sealed class MqttClientSessionsManager : ISubscriptionChangedNotification
     readonly MqttSessionsStorage _sessionsStorage = new();
     readonly HashSet<MqttSession> _subscriberSessions = [];
 
+    // Cached array of subscriber sessions to avoid ToList() allocation on every message dispatch.
+    // Invalidated when subscriptions change.
+    MqttSession[] _subscriberSessionsCache;
+
     public MqttClientSessionsManager(MqttServerOptions options, MqttRetainedMessagesManager retainedMessagesManager, MqttServerEventContainer eventContainer, IMqttNetLogger logger)
     {
         ArgumentNullException.ThrowIfNull(logger);
@@ -78,6 +82,7 @@ public sealed class MqttClientSessionsManager : ISubscriptionChangedNotification
             if (_sessionsStorage.TryRemoveSession(clientId, out session))
             {
                 _subscriberSessions.Remove(session);
+                _subscriberSessionsCache = null;
             }
         }
         finally
@@ -161,11 +166,11 @@ public sealed class MqttClientSessionsManager : ISubscriptionChangedNotification
                     await _retainedMessagesManager.UpdateMessage(senderId, applicationMessage).ConfigureAwait(false);
                 }
 
-                List<MqttSession> subscriberSessions;
+                MqttSession[] subscriberSessions;
                 _sessionsManagementLock.EnterReadLock();
                 try
                 {
-                    subscriberSessions = _subscriberSessions.ToList();
+                    subscriberSessions = _subscriberSessionsCache ??= [.. _subscriberSessions];
                 }
                 finally
                 {
@@ -244,6 +249,73 @@ public sealed class MqttClientSessionsManager : ISubscriptionChangedNotification
         }
 
         return new DispatchApplicationMessageResult(reasonCode, closeConnection, reasonString, userProperties);
+    }
+
+    public async Task DispatchApplicationMessagesAsync(
+        ArraySegment<InjectedMqttApplicationMessage> injectedMessages,
+        IDictionary defaultSessionItems,
+        CancellationToken cancellationToken)
+    {
+        if (injectedMessages.Count == 0)
+        {
+            return;
+        }
+
+        // Get subscriber sessions once for all messages
+        MqttSession[] subscriberSessions;
+        _sessionsManagementLock.EnterReadLock();
+        try
+        {
+            subscriberSessions = _subscriberSessionsCache ??= [.. _subscriberSessions];
+        }
+        finally
+        {
+            _sessionsManagementLock.ExitReadLock();
+        }
+
+        // Process messages sequentially to avoid lock contention on retained messages
+        for (var msgIndex = 0; msgIndex < injectedMessages.Count; msgIndex++)
+        {
+            var injectedMessage = injectedMessages.Array![injectedMessages.Offset + msgIndex];
+            var applicationMessage = injectedMessage.ApplicationMessage;
+            var senderId = injectedMessage.SenderClientId;
+
+            // Skip interception event handling for batch - caller should pre-validate
+            if (applicationMessage == null)
+            {
+                continue;
+            }
+
+            try
+            {
+                if (applicationMessage.Retain)
+                {
+                    await _retainedMessagesManager.UpdateMessage(senderId, applicationMessage).ConfigureAwait(false);
+                }
+
+                MqttTopicHash.Calculate(applicationMessage.Topic, out var topicHash, out _, out _);
+
+                // Use parallel dispatch for multiple subscribers, sequential for single subscriber
+                if (subscriberSessions.Length > 1)
+                {
+                    Parallel.ForEach(subscriberSessions, session =>
+                    {
+                        DispatchToSession(session, applicationMessage, topicHash, senderId);
+                    });
+                }
+                else
+                {
+                    foreach (var session in subscriberSessions)
+                    {
+                        DispatchToSession(session, applicationMessage, topicHash, senderId);
+                    }
+                }
+            }
+            catch (Exception exception)
+            {
+                _logger.Error(exception, "Error while dispatching batch message");
+            }
+        }
     }
 
     public void Dispose()
@@ -446,6 +518,7 @@ public sealed class MqttClientSessionsManager : ISubscriptionChangedNotification
             {
                 // first subscribed topic
                 _subscriberSessions.Add(clientSession);
+                _subscriberSessionsCache = null;
             }
 
             foreach (var topic in subscriptionsTopics)
@@ -473,6 +546,7 @@ public sealed class MqttClientSessionsManager : ISubscriptionChangedNotification
             {
                 // last subscription removed
                 _subscriberSessions.Remove(clientSession);
+                _subscriberSessionsCache = null;
             }
         }
         finally
@@ -529,6 +603,37 @@ public sealed class MqttClientSessionsManager : ISubscriptionChangedNotification
         return GetClientSession(clientId).Unsubscribe(fakeUnsubscribePacket, CancellationToken.None);
     }
 
+    static void DispatchToSession(MqttSession session, MqttApplicationMessage applicationMessage, ulong topicHash, string senderId)
+    {
+        if (!session.TryCheckSubscriptions(
+                applicationMessage.Topic,
+                topicHash,
+                applicationMessage.QualityOfServiceLevel,
+                senderId,
+                out var checkSubscriptionsResult))
+        {
+            return;
+        }
+
+        if (!checkSubscriptionsResult.IsSubscribed)
+        {
+            return;
+        }
+
+        var publishPacketCopy = MqttPublishPacketFactory.Create(applicationMessage);
+        publishPacketCopy.QualityOfServiceLevel = checkSubscriptionsResult.QualityOfServiceLevel;
+        publishPacketCopy.SubscriptionIdentifiers = checkSubscriptionsResult.SubscriptionIdentifiers;
+
+        if (publishPacketCopy.QualityOfServiceLevel > 0)
+        {
+            publishPacketCopy.PacketIdentifier = session.PacketIdentifierProvider.GetNextPacketIdentifier();
+        }
+
+        publishPacketCopy.Retain = checkSubscriptionsResult.RetainAsPublished && applicationMessage.Retain;
+
+        session.EnqueueDataPacket(new MqttPacketBusItem(publishPacketCopy));
+    }
+
     MqttConnectedClient CreateClient(MqttConnectPacket connectPacket, IMqttChannelAdapter channelAdapter, MqttSession session)
     {
         return new MqttConnectedClient(connectPacket, channelAdapter, session, _options, _eventContainer, this, _rootLogger);
@@ -563,6 +668,7 @@ public sealed class MqttClientSessionsManager : ISubscriptionChangedNotification
                     {
                         _logger.Verbose("Deleting existing session of client '{0}' due to clean start", connectPacket.ClientId);
                         _subscriberSessions.Remove(oldSession);
+                        _subscriberSessionsCache = null;
                         session = CreateSession(connectPacket, validatingConnectionEventArgs);
                     }
                     else

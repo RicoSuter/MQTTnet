@@ -8,17 +8,25 @@ namespace MQTTnet.PacketDispatcher;
 
 public sealed class MqttPacketDispatcher : IDisposable
 {
-    readonly List<IMqttPacketAwaitable> _waiters = [];
+    // Dictionary for O(1) lookup by (identifier, type)
+    readonly Dictionary<(ushort Identifier, Type Type), List<IMqttPacketAwaitable>> _waitersMap = new();
+    readonly object _syncRoot = new();
 
     bool _isDisposed;
 
     public MqttPacketAwaitable<TResponsePacket> AddAwaitable<TResponsePacket>(ushort packetIdentifier) where TResponsePacket : MqttPacket
     {
         var awaitable = new MqttPacketAwaitable<TResponsePacket>(packetIdentifier, this);
+        var key = (packetIdentifier, typeof(TResponsePacket));
 
-        lock (_waiters)
+        lock (_syncRoot)
         {
-            _waiters.Add(awaitable);
+            if (!_waitersMap.TryGetValue(key, out var list))
+            {
+                list = new List<IMqttPacketAwaitable>(1);
+                _waitersMap[key] = list;
+            }
+            list.Add(awaitable);
         }
 
         return awaitable;
@@ -26,14 +34,17 @@ public sealed class MqttPacketDispatcher : IDisposable
 
     public void CancelAll()
     {
-        lock (_waiters)
+        lock (_syncRoot)
         {
-            foreach (var awaitable in _waiters)
+            foreach (var kvp in _waitersMap)
             {
-                awaitable.Cancel();
+                foreach (var awaitable in kvp.Value)
+                {
+                    awaitable.Cancel();
+                }
             }
 
-            _waiters.Clear();
+            _waitersMap.Clear();
         }
     }
 
@@ -46,7 +57,7 @@ public sealed class MqttPacketDispatcher : IDisposable
     {
         ArgumentNullException.ThrowIfNull(exception);
 
-        lock (_waiters)
+        lock (_syncRoot)
         {
             FailAll(exception);
 
@@ -60,14 +71,17 @@ public sealed class MqttPacketDispatcher : IDisposable
     {
         ArgumentNullException.ThrowIfNull(exception);
 
-        lock (_waiters)
+        lock (_syncRoot)
         {
-            foreach (var awaitable in _waiters)
+            foreach (var kvp in _waitersMap)
             {
-                awaitable.Fail(exception);
+                foreach (var awaitable in kvp.Value)
+                {
+                    awaitable.Fail(exception);
+                }
             }
 
-            _waiters.Clear();
+            _waitersMap.Clear();
         }
     }
 
@@ -75,9 +89,18 @@ public sealed class MqttPacketDispatcher : IDisposable
     {
         ArgumentNullException.ThrowIfNull(awaitable);
 
-        lock (_waiters)
+        var key = (awaitable.Filter.Identifier, awaitable.Filter.Type);
+
+        lock (_syncRoot)
         {
-            _waiters.Remove(awaitable);
+            if (_waitersMap.TryGetValue(key, out var list))
+            {
+                list.Remove(awaitable);
+                if (list.Count == 0)
+                {
+                    _waitersMap.Remove(key);
+                }
+            }
         }
     }
 
@@ -92,35 +115,33 @@ public sealed class MqttPacketDispatcher : IDisposable
         }
 
         var packetType = packet.GetType();
-        var waiters = new List<IMqttPacketAwaitable>();
+        var key = (identifier, packetType);
+        List<IMqttPacketAwaitable> matchingWaiters = null;
 
-        lock (_waiters)
+        lock (_syncRoot)
         {
             ThrowIfDisposed();
 
-            for (var i = _waiters.Count - 1; i >= 0; i--)
+            // O(1) lookup by key
+            if (_waitersMap.TryGetValue(key, out var list) && list.Count > 0)
             {
-                var entry = _waiters[i];
-
-                // Note: The PingRespPacket will also arrive here and has NO identifier but there
-                // is code which waits for it. So the code must be able to deal with filters which
-                // are referring to the type only (identifier is 0)!
-                if (entry.Filter.Type != packetType || entry.Filter.Identifier != identifier)
-                {
-                    continue;
-                }
-
-                waiters.Add(entry);
-                _waiters.RemoveAt(i);
+                // Take all matching waiters (usually just one)
+                matchingWaiters = new List<IMqttPacketAwaitable>(list);
+                list.Clear();
+                _waitersMap.Remove(key);
             }
         }
 
-        foreach (var matchingEntry in waiters)
+        if (matchingWaiters != null)
         {
-            matchingEntry.Complete(packet);
+            foreach (var matchingEntry in matchingWaiters)
+            {
+                matchingEntry.Complete(packet);
+            }
+            return true;
         }
 
-        return waiters.Count > 0;
+        return false;
     }
 
     void ThrowIfDisposed()
