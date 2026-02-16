@@ -25,6 +25,6 @@
         <DebugType>Full</DebugType>
     </PropertyGroup>
 
-    <PropertyGroup Condition=" '$(Configuration)' == 'Release' ">
+    <PropertyGroup Condition="'$(Configuration)'=='Release'">
     </PropertyGroup>
 </Project>
