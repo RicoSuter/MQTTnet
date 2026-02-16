@@ -11,6 +11,16 @@ namespace MQTTnet;
 public sealed class MqttClientOptions
 {
     /// <summary>
+    ///     Gets or sets whether QoS 1 PUBACK is sent immediately upon receiving a PUBLISH packet,
+    ///     before the application message handler processes it. When enabled, this significantly improves
+    ///     throughput by preventing the server's in-flight window from filling up while messages are queued
+    ///     for processing. This is valid per MQTT spec (PUBACK confirms receipt, not processing).
+    ///     When disabled (default), PUBACK is sent after the application message handler completes,
+    ///     preserving the existing behavior and compatibility with <see cref="MqttApplicationMessageReceivedEventArgs.AutoAcknowledge"/>.
+    /// </summary>
+    public bool AcknowledgeQoS1OnReceive { get; set; }
+
+    /// <summary>
     ///     Usually the MQTT packets can be sent partially. This is done by using multiple TCP packets
     ///     or WebSocket frames etc. Unfortunately not all brokers (like Amazon Web Services (AWS)) do support this feature and
     ///     will close the connection when receiving such packets. If such a service is used this flag must
