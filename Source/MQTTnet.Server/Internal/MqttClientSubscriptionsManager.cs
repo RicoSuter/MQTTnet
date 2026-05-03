@@ -42,15 +42,23 @@ public sealed class MqttClientSubscriptionsManager : IDisposable
 
     public CheckSubscriptionsResult CheckSubscriptions(string topic, ulong topicHash, MqttQualityOfServiceLevel qualityOfServiceLevel, string senderId)
     {
-        var possibleSubscriptions = new List<MqttSubscription>();
+        var senderIsReceiver = string.Equals(senderId, _session.Id, StringComparison.Ordinal);
+        var maxQoSLevel = -1;
+        HashSet<uint> subscriptionIdentifiers = null;
+        var retainAsPublished = false;
 
-        // Check for possible subscriptions. They might have collisions but this is fine.
         _subscriptionsLock.EnterReadLock();
         try
         {
             if (_noWildcardSubscriptionsByTopicHash.TryGetValue(topicHash, out var noWildcardSubscriptions))
             {
-                possibleSubscriptions.AddRange(noWildcardSubscriptions);
+                foreach (var subscription in noWildcardSubscriptions)
+                {
+                    if (MqttTopicFilterComparer.Compare(topic, subscription.Topic) == MqttTopicFilterCompareResult.IsMatch)
+                    {
+                        EvaluateSubscription(subscription, senderIsReceiver, ref maxQoSLevel, ref retainAsPublished, ref subscriptionIdentifiers);
+                    }
+                }
             }
 
             foreach (var wcs in _wildcardSubscriptionsByTopicHash)
@@ -59,11 +67,15 @@ public sealed class MqttClientSubscriptionsManager : IDisposable
                 var subscriptionsByHashMask = wcs.Value.SubscriptionsByHashMask;
                 foreach (var shm in subscriptionsByHashMask)
                 {
-                    var subscriptionHashMask = shm.Key;
-                    if ((topicHash & subscriptionHashMask) == subscriptionHash)
+                    if ((topicHash & shm.Key) == subscriptionHash)
                     {
-                        var subscriptions = shm.Value;
-                        possibleSubscriptions.AddRange(subscriptions);
+                        foreach (var subscription in shm.Value)
+                        {
+                            if (MqttTopicFilterComparer.Compare(topic, subscription.Topic) == MqttTopicFilterCompareResult.IsMatch)
+                            {
+                                EvaluateSubscription(subscription, senderIsReceiver, ref maxQoSLevel, ref retainAsPublished, ref subscriptionIdentifiers);
+                            }
+                        }
                     }
                 }
             }
@@ -73,85 +85,51 @@ public sealed class MqttClientSubscriptionsManager : IDisposable
             _subscriptionsLock.ExitReadLock();
         }
 
-        // The pre check has evaluated that nothing is subscribed.
-        // If there were some possible candidates they get checked below
-        // again to avoid collisions.
-        if (possibleSubscriptions.Count == 0)
-        {
-            return CheckSubscriptionsResult.NotSubscribed;
-        }
-
-        var senderIsReceiver = string.Equals(senderId, _session.Id, StringComparison.Ordinal);
-        var maxQoSLevel = -1; // Not subscribed.
-
-        HashSet<uint> subscriptionIdentifiers = null;
-        var retainAsPublished = false;
-
-        foreach (var subscription in possibleSubscriptions)
-        {
-            if (subscription.NoLocal && senderIsReceiver)
-            {
-                // This is a MQTTv5 feature!
-                continue;
-            }
-
-            if (MqttTopicFilterComparer.Compare(topic, subscription.Topic) != MqttTopicFilterCompareResult.IsMatch)
-            {
-                continue;
-            }
-
-            if (subscription.RetainAsPublished)
-            {
-                // This is a MQTTv5 feature!
-                retainAsPublished = true;
-            }
-
-            if ((int)subscription.GrantedQualityOfServiceLevel > maxQoSLevel)
-            {
-                maxQoSLevel = (int)subscription.GrantedQualityOfServiceLevel;
-            }
-
-            if (subscription.Identifier > 0)
-            {
-                if (subscriptionIdentifiers == null)
-                {
-                    subscriptionIdentifiers = new HashSet<uint>();
-                }
-
-                subscriptionIdentifiers.Add(subscription.Identifier);
-            }
-        }
-
         if (maxQoSLevel == -1)
         {
             return CheckSubscriptionsResult.NotSubscribed;
         }
 
-        var result = new CheckSubscriptionsResult
+        var effectiveQoS = maxQoSLevel < (int)qualityOfServiceLevel
+            ? (MqttQualityOfServiceLevel)maxQoSLevel
+            : qualityOfServiceLevel;
+
+        return new CheckSubscriptionsResult
         {
             IsSubscribed = true,
             RetainAsPublished = retainAsPublished,
             SubscriptionIdentifiers = subscriptionIdentifiers?.ToList() ?? EmptySubscriptionIdentifiers,
-
-            // Start with the same QoS as the publisher.
-            QualityOfServiceLevel = qualityOfServiceLevel
+            QualityOfServiceLevel = effectiveQoS
         };
+    }
 
-        // Now downgrade if required.
-        //
-        // If a subscribing Client has been granted maximum QoS 1 for a particular Topic Filter, then a QoS 0 Application Message matching the filter is delivered
-        // to the Client at QoS 0. This means that at most one copy of the message is received by the Client. On the other hand, a QoS 2 Message published to
-        // the same topic is downgraded by the Server to QoS 1 for delivery to the Client, so that Client might receive duplicate copies of the Message.
-
-        // Subscribing to a Topic Filter at QoS 2 is equivalent to saying "I would like to receive Messages matching this filter at the QoS with which they were published".
-        // This means a publisher is responsible for determining the maximum QoS a Message can be delivered at, but a subscriber is able to require that the Server
-        // downgrades the QoS to one more suitable for its usage.
-        if (maxQoSLevel < (int)qualityOfServiceLevel)
+    static void EvaluateSubscription(
+        MqttSubscription subscription,
+        bool senderIsReceiver,
+        ref int maxQoSLevel,
+        ref bool retainAsPublished,
+        ref HashSet<uint> subscriptionIdentifiers)
+    {
+        if (subscription.NoLocal && senderIsReceiver)
         {
-            result.QualityOfServiceLevel = (MqttQualityOfServiceLevel)maxQoSLevel;
+            return;
         }
 
-        return result;
+        if (subscription.RetainAsPublished)
+        {
+            retainAsPublished = true;
+        }
+
+        if ((int)subscription.GrantedQualityOfServiceLevel > maxQoSLevel)
+        {
+            maxQoSLevel = (int)subscription.GrantedQualityOfServiceLevel;
+        }
+
+        if (subscription.Identifier > 0)
+        {
+            subscriptionIdentifiers ??= new HashSet<uint>();
+            subscriptionIdentifiers.Add(subscription.Identifier);
+        }
     }
 
     public void Dispose()
