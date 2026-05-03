@@ -278,6 +278,100 @@ public sealed class MqttClient : Disposable, IMqttClient
         }
     }
 
+    public async Task PublishMessagesAsync(ArraySegment<MqttApplicationMessage> applicationMessages, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        ThrowIfDisposed();
+        ThrowIfNotConnected();
+
+        if (applicationMessages.Count == 0)
+        {
+            return;
+        }
+
+        // Create packets and determine QoS
+        var packets = new MqttPublishPacket[applicationMessages.Count];
+        var qos1Count = 0;
+
+        for (var i = 0; i < applicationMessages.Count; i++)
+        {
+            var message = applicationMessages.Array![applicationMessages.Offset + i];
+            MqttTopicValidator.ThrowIfInvalid(message);
+
+            if (Options.ValidateFeatures)
+            {
+                MqttApplicationMessageValidator.ThrowIfNotSupported(message, _adapter.PacketFormatterAdapter.ProtocolVersion);
+            }
+
+            var packet = MqttPublishPacketFactory.Create(message);
+
+            if (message.QualityOfServiceLevel == MqttQualityOfServiceLevel.AtLeastOnce)
+            {
+                packet.PacketIdentifier = _packetIdentifierProvider.GetNextPacketIdentifier();
+                qos1Count++;
+            }
+            else if (message.QualityOfServiceLevel == MqttQualityOfServiceLevel.ExactlyOnce)
+            {
+                throw new NotSupportedException("QoS 2 (ExactlyOnce) is not supported in batch publish. Use PublishAsync for QoS 2 messages.");
+            }
+
+            packets[i] = packet;
+        }
+
+        // QoS 0 only - just send
+        if (qos1Count == 0)
+        {
+            await SendPackets(new ArraySegment<MqttPacket>(packets), cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        // QoS 1 - register awaitables first, then send, then wait
+        var awaitables = new MqttPacketAwaitable<MqttPubAckPacket>[qos1Count];
+        var awaitableIndex = 0;
+
+        for (var i = 0; i < packets.Length; i++)
+        {
+            if (packets[i].QualityOfServiceLevel == MqttQualityOfServiceLevel.AtLeastOnce)
+            {
+                awaitables[awaitableIndex++] = _packetDispatcher.AddAwaitable<MqttPubAckPacket>(packets[i].PacketIdentifier);
+            }
+        }
+
+        try
+        {
+            // Single batch send for all packets
+            await SendPackets(new ArraySegment<MqttPacket>(packets), cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            _logger.Warning(exception, "Error when sending batch of {0} publish packets", packets.Length);
+            foreach (var awaitable in awaitables)
+            {
+                awaitable.Fail(exception);
+            }
+            throw;
+        }
+
+        // Wait for all PUBACKs
+        try
+        {
+            var waitTasks = new Task[awaitables.Length];
+            for (var i = 0; i < awaitables.Length; i++)
+            {
+                waitTasks[i] = awaitables[i].WaitOneAsync(cancellationToken);
+            }
+            await Task.WhenAll(waitTasks).ConfigureAwait(false);
+        }
+        finally
+        {
+            foreach (var awaitable in awaitables)
+            {
+                awaitable.Dispose();
+            }
+        }
+    }
+
     public Task SendEnhancedAuthenticationExchangeDataAsync(MqttEnhancedAuthenticationExchangeData data, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(data);
@@ -387,12 +481,8 @@ public sealed class MqttClient : Disposable, IMqttClient
             }
             case MqttQualityOfServiceLevel.AtLeastOnce:
             {
-                if (!eventArgs.ProcessingFailed)
-                {
-                    var pubAckPacket = MqttPubAckPacketFactory.Create(eventArgs);
-                    return Send(pubAckPacket, cancellationToken);
-                }
-
+                // QoS 1 PUBACK is now sent immediately upon receiving (before queueing)
+                // to minimize latency. No need to send again here.
                 break;
             }
             case MqttQualityOfServiceLevel.ExactlyOnce:
@@ -676,22 +766,39 @@ public sealed class MqttClient : Disposable, IMqttClient
 
     async Task ProcessReceivedPublishPackets(CancellationToken cancellationToken)
     {
+        const int batchSize = 100;
+        var publishPacketBuffer = new MqttPublishPacket[batchSize];
+        var ackPacketBuffer = new MqttPacket[batchSize];
+
         while (!cancellationToken.IsCancellationRequested)
         {
             try
             {
-                var publishPacketDequeueResult = await _publishPacketReceiverQueue.TryDequeueAsync(cancellationToken).ConfigureAwait(false);
-                if (!publishPacketDequeueResult.IsSuccess)
+                var count = await _publishPacketReceiverQueue.TryDequeueBatchAsync(publishPacketBuffer, batchSize, cancellationToken).ConfigureAwait(false);
+                if (count == 0)
                 {
                     return;
                 }
 
-                var publishPacket = publishPacketDequeueResult.Item;
-                var eventArgs = await HandleReceivedApplicationMessage(publishPacket).ConfigureAwait(false);
-
-                if (eventArgs.AutoAcknowledge)
+                var ackCount = 0;
+                for (var i = 0; i < count; i++)
                 {
-                    await eventArgs.AcknowledgeAsync(cancellationToken).ConfigureAwait(false);
+                    var publishPacket = publishPacketBuffer[i];
+                    var eventArgs = await HandleReceivedApplicationMessage(publishPacket).ConfigureAwait(false);
+
+                    if (eventArgs.AutoAcknowledge)
+                    {
+                        var ackPacket = CreateAcknowledgementPacket(eventArgs);
+                        if (ackPacket != null)
+                        {
+                            ackPacketBuffer[ackCount++] = ackPacket;
+                        }
+                    }
+                }
+
+                if (ackCount > 0)
+                {
+                    await SendPackets(new ArraySegment<MqttPacket>(ackPacketBuffer, 0, ackCount), cancellationToken).ConfigureAwait(false);
                 }
             }
             catch (ObjectDisposedException)
@@ -704,6 +811,28 @@ public sealed class MqttClient : Disposable, IMqttClient
             {
                 _logger.Error(exception, "Error while handling application message");
             }
+        }
+    }
+
+    static MqttPubRecPacket CreateAcknowledgementPacket(MqttApplicationMessageReceivedEventArgs eventArgs)
+    {
+        switch (eventArgs.PublishPacket.QualityOfServiceLevel)
+        {
+            case MqttQualityOfServiceLevel.AtMostOnce:
+                // No acknowledgment needed for QoS 0
+                return null;
+            case MqttQualityOfServiceLevel.AtLeastOnce:
+                // QoS 1 PUBACK is now sent immediately upon receiving (before queueing)
+                // to minimize latency. No need to send again here.
+                return null;
+            case MqttQualityOfServiceLevel.ExactlyOnce:
+                if (!eventArgs.ProcessingFailed)
+                {
+                    return MqttPubRecPacketFactory.Create(eventArgs);
+                }
+                return null;
+            default:
+                throw new MqttProtocolViolationException("Received a not supported QoS level.");
         }
     }
 
@@ -894,6 +1023,15 @@ public sealed class MqttClient : Disposable, IMqttClient
         return _adapter.SendPacketAsync(packet, cancellationToken);
     }
 
+    Task SendPackets(ArraySegment<MqttPacket> packets, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        _lastPacketSentTimestamp = DateTime.UtcNow;
+
+        return _adapter.SendPacketsAsync(packets, cancellationToken);
+    }
+
     void ThrowIfConnected(string message)
     {
         if (IsConnected)
@@ -952,6 +1090,13 @@ public sealed class MqttClient : Disposable, IMqttClient
             switch (packet)
             {
                 case MqttPublishPacket publishPacket:
+                    // For QoS 1, send PUBACK immediately upon receiving to minimize latency.
+                    // This is valid per MQTT spec - PUBACK confirms receipt, not processing.
+                    if (publishPacket.QualityOfServiceLevel == MqttQualityOfServiceLevel.AtLeastOnce)
+                    {
+                        var pubAckPacket = new MqttPubAckPacket { PacketIdentifier = publishPacket.PacketIdentifier };
+                        await Send(pubAckPacket, cancellationToken).ConfigureAwait(false);
+                    }
                     EnqueueReceivedPublishPacket(publishPacket);
                     break;
                 case MqttPubRecPacket pubRecPacket:

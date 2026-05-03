@@ -268,6 +268,23 @@ public class MqttServer : Disposable
             cancellationToken);
     }
 
+    public Task InjectApplicationMessagesAsync(
+        ArraySegment<InjectedMqttApplicationMessage> injectedApplicationMessages,
+        CancellationToken cancellationToken = default)
+    {
+        if (injectedApplicationMessages.Count == 0)
+        {
+            return Task.CompletedTask;
+        }
+
+        ThrowIfNotStarted();
+
+        return _clientSessionsManager.DispatchApplicationMessagesAsync(
+            injectedApplicationMessages,
+            ServerSessionItems,
+            cancellationToken);
+    }
+
     public async Task StartAsync()
     {
         ThrowIfStarted();

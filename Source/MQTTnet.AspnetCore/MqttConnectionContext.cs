@@ -242,6 +242,47 @@ public sealed class MqttConnectionContext : IMqttChannelAdapter
         }
     }
 
+    public async Task SendPacketsAsync(ArraySegment<MqttPacket> packets, CancellationToken cancellationToken)
+    {
+        if (packets.Count == 0)
+        {
+            return;
+        }
+
+        // Fast path for single packet
+        if (packets.Count == 1)
+        {
+            await SendPacketAsync(packets.Array![packets.Offset], cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        using (await _writerLock.EnterAsync(cancellationToken).ConfigureAwait(false))
+        {
+            try
+            {
+                var totalLength = 0;
+
+                // Encode all packets and write to PipeWriter in sequence
+                for (var i = 0; i < packets.Count; i++)
+                {
+                    var packet = packets.Array![packets.Offset + i];
+                    var buffer = PacketFormatterAdapter.Encode(packet);
+                    WritePacketBuffer(_output, buffer);
+                    totalLength += buffer.Length;
+                }
+
+                // Single flush for all packets
+                await _output.FlushAsync(cancellationToken).ConfigureAwait(false);
+
+                BytesSent += totalLength;
+            }
+            finally
+            {
+                PacketFormatterAdapter.Cleanup();
+            }
+        }
+    }
+
     static void WritePacketBuffer(PipeWriter output, MqttPacketBuffer buffer)
     {
         // copy MqttPacketBuffer's Packet and Payload to the same buffer block of PipeWriter
