@@ -481,8 +481,17 @@ public sealed class MqttClient : Disposable, IMqttClient
             }
             case MqttQualityOfServiceLevel.AtLeastOnce:
             {
-                // QoS 1 PUBACK is now sent immediately upon receiving (before queueing)
-                // to minimize latency. No need to send again here.
+                if (Options.AcknowledgeQoS1OnReceive)
+                {
+                    break;
+                }
+
+                if (!eventArgs.ProcessingFailed)
+                {
+                    var pubAckPacket = MqttPubAckPacketFactory.Create(eventArgs);
+                    return Send(pubAckPacket, cancellationToken);
+                }
+
                 break;
             }
             case MqttQualityOfServiceLevel.ExactlyOnce:
@@ -1090,13 +1099,12 @@ public sealed class MqttClient : Disposable, IMqttClient
             switch (packet)
             {
                 case MqttPublishPacket publishPacket:
-                    // For QoS 1, send PUBACK immediately upon receiving to minimize latency.
-                    // This is valid per MQTT spec - PUBACK confirms receipt, not processing.
-                    if (publishPacket.QualityOfServiceLevel == MqttQualityOfServiceLevel.AtLeastOnce)
+                    if (Options.AcknowledgeQoS1OnReceive && publishPacket.QualityOfServiceLevel == MqttQualityOfServiceLevel.AtLeastOnce)
                     {
                         var pubAckPacket = new MqttPubAckPacket { PacketIdentifier = publishPacket.PacketIdentifier };
                         await Send(pubAckPacket, cancellationToken).ConfigureAwait(false);
                     }
+
                     EnqueueReceivedPublishPacket(publishPacket);
                     break;
                 case MqttPubRecPacket pubRecPacket:
