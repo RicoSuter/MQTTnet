@@ -26,6 +26,8 @@ public interface IMqttClient : IDisposable
 
     Task<MqttClientPublishResult> PublishAsync(MqttApplicationMessage applicationMessage, CancellationToken cancellationToken = default);
 
+    Task PublishMessagesAsync(ArraySegment<MqttApplicationMessage> applicationMessages, CancellationToken cancellationToken = default);
+
     Task SendEnhancedAuthenticationExchangeDataAsync(MqttEnhancedAuthenticationExchangeData data, CancellationToken cancellationToken = default);
 
     Task<MqttClientSubscribeResult> SubscribeAsync(MqttClientSubscribeOptions options, CancellationToken cancellationToken = default);

@@ -8,11 +8,11 @@ namespace MQTTnet.Internal;
 
 public sealed class MqttPacketBus : IDisposable
 {
-    readonly LinkedList<MqttPacketBusItem>[] _partitions =
+    readonly Queue<MqttPacketBusItem>[] _partitions =
     [
-        [],
-        [],
-        []
+        new(),
+        new(),
+        new()
     ];
 
     readonly AsyncSignal _signal = new();
@@ -65,12 +65,9 @@ public sealed class MqttPacketBus : IDisposable
 
                     var activePartition = _partitions[_activePartition];
 
-                    if (activePartition.First != null)
+                    if (activePartition.TryDequeue(out var item))
                     {
-                        var item = activePartition.First;
-                        activePartition.RemoveFirst();
-
-                        return item.Value;
+                        return item;
                     }
                 }
             }
@@ -94,6 +91,65 @@ public sealed class MqttPacketBus : IDisposable
         throw new InvalidOperationException("MqttPacketBus is broken.");
     }
 
+    public async Task<int> DequeueItemsAsync(MqttPacketBusItem[] buffer, int maxCount, CancellationToken cancellationToken)
+    {
+        if (maxCount <= 0 || buffer == null || buffer.Length < maxCount)
+        {
+            throw new ArgumentException("Invalid buffer or maxCount");
+        }
+
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            var count = 0;
+
+            lock (_syncRoot)
+            {
+                // Dequeue up to maxCount items, cycling through partitions to maintain fairness
+                while (count < maxCount)
+                {
+                    var foundAny = false;
+
+                    for (var i = 0; i < 3 && count < maxCount; i++)
+                    {
+                        MoveActivePartition();
+
+                        var activePartition = _partitions[_activePartition];
+
+                        if (activePartition.TryDequeue(out var item))
+                        {
+                            buffer[count++] = item;
+                            foundAny = true;
+                        }
+                    }
+
+                    if (!foundAny)
+                    {
+                        break;
+                    }
+                }
+            }
+
+            if (count > 0)
+            {
+                return count;
+            }
+
+            // No partition contains data so that we have to wait
+            try
+            {
+                await _signal.WaitAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch (ObjectDisposedException)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                throw;
+            }
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        return 0;
+    }
+
     public void Dispose()
     {
         _signal.Dispose();
@@ -105,11 +161,8 @@ public sealed class MqttPacketBus : IDisposable
         {
             var partitionInstance = _partitions[(int)partition];
 
-            if (partitionInstance.Count > 0)
+            if (partitionInstance.TryDequeue(out var firstItem))
             {
-                var firstItem = partitionInstance.First!.Value;
-                partitionInstance.RemoveFirst();
-
                 return firstItem;
             }
         }
@@ -123,7 +176,7 @@ public sealed class MqttPacketBus : IDisposable
 
         lock (_syncRoot)
         {
-            _partitions[(int)partition].AddLast(item);
+            _partitions[(int)partition].Enqueue(item);
             _signal.Set();
         }
     }

@@ -370,8 +370,6 @@ public sealed class MqttConnectedClient : IDisposable
             // own exception in the reading loop!
             while (!cancellationToken.IsCancellationRequested)
             {
-                await Task.Yield();
-
                 currentPacket = await ChannelAdapter.ReceivePacketAsync(cancellationToken).ConfigureAwait(false);
                 if (currentPacket == null)
                 {
@@ -488,13 +486,15 @@ public sealed class MqttConnectedClient : IDisposable
 
     async Task SendPacketsLoop(CancellationToken cancellationToken)
     {
-        MqttPacketBusItem packetBusItem = null;
+        // Batch buffer to reduce dequeue overhead - process up to 64 packets per iteration
+        var batchBuffer = new MqttPacketBusItem[64];
+        var packetBuffer = new MqttPacket[64];
 
         try
         {
             while (!cancellationToken.IsCancellationRequested && !IsTakenOver && IsRunning)
             {
-                packetBusItem = await Session.DequeuePacketAsync(cancellationToken).ConfigureAwait(false);
+                var batchCount = await Session.DequeuePacketsAsync(batchBuffer, batchBuffer.Length, cancellationToken).ConfigureAwait(false);
 
                 // Also check the cancellation token here because the dequeue is blocking and may take some time.
                 if (cancellationToken.IsCancellationRequested)
@@ -507,22 +507,38 @@ public sealed class MqttConnectedClient : IDisposable
                     return;
                 }
 
+                // Extract packets from bus items for batch send
+                for (var i = 0; i < batchCount; i++)
+                {
+                    packetBuffer[i] = batchBuffer[i].Packet;
+                }
+
                 try
                 {
-                    await SendPacketAsync(packetBusItem.Packet, cancellationToken).ConfigureAwait(false);
-                    packetBusItem.Complete();
+                    // Send all packets in a single batch operation
+                    await ChannelAdapter.SendPacketsAsync(new ArraySegment<MqttPacket>(packetBuffer, 0, batchCount), cancellationToken).ConfigureAwait(false);
+
+                    // Mark all items as completed
+                    for (var i = 0; i < batchCount; i++)
+                    {
+                        batchBuffer[i].Complete();
+                    }
                 }
                 catch (OperationCanceledException)
                 {
-                    packetBusItem.Cancel();
+                    for (var i = 0; i < batchCount; i++)
+                    {
+                        batchBuffer[i].Cancel();
+                    }
                 }
                 catch (Exception exception)
                 {
-                    packetBusItem.Fail(exception);
-                }
-                finally
-                {
-                    await Task.Yield();
+                    for (var i = 0; i < batchCount; i++)
+                    {
+                        batchBuffer[i].Fail(exception);
+                    }
+
+                    throw;
                 }
             }
         }
@@ -533,24 +549,15 @@ public sealed class MqttConnectedClient : IDisposable
         {
             if (exception is MqttCommunicationTimedOutException)
             {
-                _logger.Warning(exception, "Client '{0}': Sending PUBLISH packet failed due to timeout", Id);
+                _logger.Warning(exception, "Client '{0}': Sending packets failed due to timeout", Id);
             }
             else if (exception is MqttCommunicationException)
             {
-                _logger.Warning(exception, "Client '{0}': Sending PUBLISH packet failed due to communication exception", Id);
+                _logger.Warning(exception, "Client '{0}': Sending packets failed due to communication exception", Id);
             }
             else
             {
-                _logger.Error(exception, "Client '{0}': Sending PUBLISH packet failed", Id);
-            }
-
-            if (packetBusItem?.Packet is MqttPublishPacket publishPacket)
-            {
-                if (publishPacket.QualityOfServiceLevel > MqttQualityOfServiceLevel.AtMostOnce)
-                {
-                    publishPacket.Dup = true;
-                    Session.EnqueueDataPacket(new MqttPacketBusItem(publishPacket));
-                }
+                _logger.Error(exception, "Client '{0}': Sending packets failed", Id);
             }
 
             StopInternal();
