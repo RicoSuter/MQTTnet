@@ -20,8 +20,8 @@ public sealed class MqttSession : IDisposable
     readonly MqttServerOptions _serverOptions;
     readonly MqttClientSubscriptionsManager _subscriptionsManager;
 
-    // Do not use a dictionary in order to keep the ordering of the messages.
-    readonly List<MqttPublishPacket> _unacknowledgedPublishPackets = new();
+    // Use Dictionary for O(1) lookup by packet identifier.
+    readonly Dictionary<ushort, MqttPublishPacket> _unacknowledgedPublishPackets = new();
 
     // Bookkeeping to know if this is a subscribing client; lazy initialize later.
     HashSet<string> _subscribedTopics;
@@ -68,15 +68,15 @@ public sealed class MqttSession : IDisposable
 
     public MqttPublishPacket AcknowledgePublishPacket(ushort packetIdentifier)
     {
-        MqttPublishPacket publishPacket;
-
         lock (_unacknowledgedPublishPackets)
         {
-            publishPacket = _unacknowledgedPublishPackets.FirstOrDefault(p => p.PacketIdentifier.Equals(packetIdentifier));
-            _unacknowledgedPublishPackets.Remove(publishPacket);
+            if (_unacknowledgedPublishPackets.Remove(packetIdentifier, out var publishPacket))
+            {
+                return publishPacket;
+            }
         }
 
-        return publishPacket;
+        return null;
     }
 
     public void AddSubscribedTopic(string topic)
@@ -94,9 +94,9 @@ public sealed class MqttSession : IDisposable
         return _clientSessionsManager.DeleteSessionAsync(Id);
     }
 
-    public Task<MqttPacketBusItem> DequeuePacketAsync(CancellationToken cancellationToken)
+    public Task<int> DequeuePacketsAsync(MqttPacketBusItem[] buffer, int maxCount, CancellationToken cancellationToken)
     {
-        return _packetBus.DequeueItemAsync(cancellationToken);
+        return _packetBus.DequeueItemsAsync(buffer, maxCount, cancellationToken);
     }
 
     public void Dispose()
@@ -146,7 +146,7 @@ public sealed class MqttSession : IDisposable
 
             lock (_unacknowledgedPublishPackets)
             {
-                _unacknowledgedPublishPackets.Add(publishPacket);
+                _unacknowledgedPublishPackets[publishPacket.PacketIdentifier] = publishPacket;
             }
         }
 
@@ -165,7 +165,8 @@ public sealed class MqttSession : IDisposable
         // This is required for QoS 2.
         lock (_unacknowledgedPublishPackets)
         {
-            return _unacknowledgedPublishPackets.FirstOrDefault(p => p.PacketIdentifier.Equals(packetIdentifier));
+            _unacknowledgedPublishPackets.TryGetValue(packetIdentifier, out var publishPacket);
+            return publishPacket;
         }
     }
 
@@ -194,7 +195,7 @@ public sealed class MqttSession : IDisposable
         List<MqttPublishPacket> unacknowledgedPublishPackets;
         lock (_unacknowledgedPublishPackets)
         {
-            unacknowledgedPublishPackets = _unacknowledgedPublishPackets.ToList();
+            unacknowledgedPublishPackets = _unacknowledgedPublishPackets.Values.ToList();
             _unacknowledgedPublishPackets.Clear();
         }
 

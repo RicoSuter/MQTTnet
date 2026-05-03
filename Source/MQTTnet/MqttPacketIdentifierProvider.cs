@@ -6,31 +6,18 @@ namespace MQTTnet;
 
 public sealed class MqttPacketIdentifierProvider
 {
-    readonly object _syncRoot = new();
-
-    ushort _value;
+    int _value;
 
     public ushort GetNextPacketIdentifier()
     {
-        lock (_syncRoot)
-        {
-            _value++;
-
-            if (_value == 0)
-            {
-                // As per official MQTT documentation the package identifier should never be 0.
-                _value = 1;
-            }
-
-            return _value;
-        }
+        // Lock-free increment using Interlocked
+        // Map to 1-65535 range (MQTT spec: packet identifier must never be 0)
+        var newValue = Interlocked.Increment(ref _value);
+        return (ushort)((uint)(newValue - 1) % 65535 + 1);
     }
 
     public void Reset()
     {
-        lock (_syncRoot)
-        {
-            _value = 0;
-        }
+        Volatile.Write(ref _value, 0);
     }
 }

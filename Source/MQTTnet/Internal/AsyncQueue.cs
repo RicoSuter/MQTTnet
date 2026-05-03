@@ -104,4 +104,65 @@ public sealed class AsyncQueue<TItem> : IDisposable
 
         return AsyncQueueDequeueResult<TItem>.NonSuccess;
     }
+
+    /// <summary>
+    /// Dequeues up to maxCount items into the buffer. Waits for at least one item if the queue is empty.
+    /// Returns the number of items dequeued.
+    /// </summary>
+    public async Task<int> TryDequeueBatchAsync(TItem[] buffer, int maxCount, CancellationToken cancellationToken)
+    {
+        if (maxCount <= 0 || buffer == null || buffer.Length < maxCount)
+        {
+            return 0;
+        }
+
+        // Wait for at least one item
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            try
+            {
+                Task task = null;
+                lock (_syncRoot)
+                {
+                    if (_isDisposed)
+                    {
+                        return 0;
+                    }
+
+                    if (_queue.IsEmpty)
+                    {
+                        task = _signal.WaitAsync(cancellationToken);
+                    }
+                }
+
+                if (task != null)
+                {
+                    await task.ConfigureAwait(false);
+                }
+
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    return 0;
+                }
+
+                // Dequeue as many items as available, up to maxCount
+                var count = 0;
+                while (count < maxCount && _queue.TryDequeue(out var item))
+                {
+                    buffer[count++] = item;
+                }
+
+                if (count > 0)
+                {
+                    return count;
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                return 0;
+            }
+        }
+
+        return 0;
+    }
 }
