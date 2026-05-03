@@ -387,6 +387,11 @@ public sealed class MqttClient : Disposable, IMqttClient
             }
             case MqttQualityOfServiceLevel.AtLeastOnce:
             {
+                if (Options.AcknowledgeQoS1OnReceive)
+                {
+                    break;
+                }
+
                 if (!eventArgs.ProcessingFailed)
                 {
                     var pubAckPacket = MqttPubAckPacketFactory.Create(eventArgs);
@@ -952,6 +957,12 @@ public sealed class MqttClient : Disposable, IMqttClient
             switch (packet)
             {
                 case MqttPublishPacket publishPacket:
+                    if (Options.AcknowledgeQoS1OnReceive && publishPacket.QualityOfServiceLevel == MqttQualityOfServiceLevel.AtLeastOnce)
+                    {
+                        var pubAckPacket = new MqttPubAckPacket { PacketIdentifier = publishPacket.PacketIdentifier };
+                        await Send(pubAckPacket, cancellationToken).ConfigureAwait(false);
+                    }
+
                     EnqueueReceivedPublishPacket(publishPacket);
                     break;
                 case MqttPubRecPacket pubRecPacket:
