@@ -389,9 +389,8 @@ public sealed class MqttClientSubscriptionsManager : IDisposable
 
         if (subscription.TopicHasWildcard)
         {
-            // Wildcard subscriptions must scan all retained messages. Iterate in reverse to match
-            // the original (list-backward) iteration order.
-            foreach (var kvp in retainedMessagesByTopic.Reverse())
+            // Wildcard subscriptions must scan all retained messages.
+            foreach (var kvp in retainedMessagesByTopic)
             {
                 if (matchedTopics.Contains(kvp.Key))
                 {
