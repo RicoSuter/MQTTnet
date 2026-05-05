@@ -125,18 +125,18 @@ public sealed class MqttClientSubscriptionsManager : IDisposable
     {
         ArgumentNullException.ThrowIfNull(subscribePacket);
 
-        // Snapshot retained messages before installing subscriptions to preserve the original
-        // race semantics (retained messages published during the Subscribe call are not delivered
-        // both as a live forward and as a retained-on-subscribe match).
         var retainedMessagesByTopic = _retainedMessagesManager.GetMessagesByTopic();
-
         var result = new SubscribeResult(subscribePacket.TopicFilters.Count);
 
         var addedSubscriptions = new List<string>();
         var finalTopicFilters = new List<MqttTopicFilter>();
-        var validatedFilters = new List<(MqttTopicFilter TopicFilter, MqttSubscribeReasonCode ReasonCode)>(subscribePacket.TopicFilters.Count);
 
-        // The topic filters are ordered by QoS so that the higher QoS will win over a lower one.
+        // Tracks retained topics already delivered for this SUBSCRIBE packet so the client receives
+        // every retained message only one time even if multiple subscriptions in the same packet match.
+        var matchedTopics = new HashSet<string>(StringComparer.Ordinal);
+
+        // The topic filters are order by its QoS so that the higher QoS will win over a
+        // lower one.
         foreach (var topicFilterItem in subscribePacket.TopicFilters.OrderByDescending(f => f.QualityOfServiceLevel))
         {
             var interceptorEventArgs = await InterceptSubscribe(topicFilterItem, subscribePacket.UserProperties, cancellationToken).ConfigureAwait(false);
@@ -159,20 +159,12 @@ public sealed class MqttClientSubscriptionsManager : IDisposable
                 continue;
             }
 
-            validatedFilters.Add((topicFilter, interceptorEventArgs.Response.ReasonCode));
-        }
+            var createSubscriptionResult = CreateSubscription(topicFilter, subscribePacket.SubscriptionIdentifier, interceptorEventArgs.Response.ReasonCode);
 
-        // Batch-create all subscriptions under a single write lock.
-        var createResults = CreateSubscriptionsBatch(validatedFilters, subscribePacket.SubscriptionIdentifier);
+            addedSubscriptions.Add(topicFilter.Topic);
+            finalTopicFilters.Add(topicFilter);
 
-        var matchedTopics = new HashSet<string>(StringComparer.Ordinal);
-
-        for (var i = 0; i < createResults.Count; i++)
-        {
-            addedSubscriptions.Add(validatedFilters[i].TopicFilter.Topic);
-            finalTopicFilters.Add(validatedFilters[i].TopicFilter);
-
-            FilterRetainedApplicationMessagesByLookup(retainedMessagesByTopic, createResults[i], result, matchedTopics);
+            FilterRetainedApplicationMessages(retainedMessagesByTopic, createSubscriptionResult, result, matchedTopics);
         }
 
         // This call will add the new subscription to the internal storage.
@@ -279,8 +271,7 @@ public sealed class MqttClientSubscriptionsManager : IDisposable
         return result;
     }
 
-    // Caller must hold _subscriptionsLock in write mode.
-    CreateSubscriptionResult CreateSubscriptionLocked(MqttTopicFilter topicFilter, uint subscriptionIdentifier, MqttSubscribeReasonCode reasonCode)
+    CreateSubscriptionResult CreateSubscription(MqttTopicFilter topicFilter, uint subscriptionIdentifier, MqttSubscribeReasonCode reasonCode)
     {
         MqttQualityOfServiceLevel grantedQualityOfServiceLevel;
 
@@ -313,52 +304,60 @@ public sealed class MqttClientSubscriptionsManager : IDisposable
 
         // Add to subscriptions and maintain topic hash dictionaries
 
-        MqttTopicHash.Calculate(topicFilter.Topic, out var topicHash, out _, out var hasWildcard);
-
-        if (_subscriptions.TryGetValue(topicFilter.Topic, out var existingSubscription))
+        _subscriptionsLock.EnterWriteLock();
+        try
         {
-            // must remove object from topic hash dictionary first
+            MqttTopicHash.Calculate(topicFilter.Topic, out var topicHash, out _, out var hasWildcard);
+
+            if (_subscriptions.TryGetValue(topicFilter.Topic, out var existingSubscription))
+            {
+                // must remove object from topic hash dictionary first
+                if (hasWildcard)
+                {
+                    if (_wildcardSubscriptionsByTopicHash.TryGetValue(topicHash, out var subscriptions))
+                    {
+                        subscriptions.RemoveSubscription(existingSubscription);
+                        // no need to remove empty entry because we'll be adding subscription again below
+                    }
+                }
+                else
+                {
+                    if (_noWildcardSubscriptionsByTopicHash.TryGetValue(topicHash, out var subscriptions))
+                    {
+                        subscriptions.Remove(existingSubscription);
+                        // no need to remove empty entry because we'll be adding subscription again below
+                    }
+                }
+            }
+
+            isNewSubscription = existingSubscription == null;
+            _subscriptions[topicFilter.Topic] = subscription;
+
+            // Add or re-add to topic hash dictionary
             if (hasWildcard)
             {
-                if (_wildcardSubscriptionsByTopicHash.TryGetValue(topicHash, out var subscriptions))
+                if (!_wildcardSubscriptionsByTopicHash.TryGetValue(topicHash, out var subscriptions))
                 {
-                    subscriptions.RemoveSubscription(existingSubscription);
-                    // no need to remove empty entry because we'll be adding subscription again below
+                    subscriptions = new TopicHashMaskSubscriptions();
+                    _wildcardSubscriptionsByTopicHash.Add(topicHash, subscriptions);
                 }
+
+                subscriptions.AddSubscription(subscription);
             }
             else
             {
-                if (_noWildcardSubscriptionsByTopicHash.TryGetValue(topicHash, out var subscriptions))
+                if (!_noWildcardSubscriptionsByTopicHash.TryGetValue(topicHash, out var subscriptions))
                 {
-                    subscriptions.Remove(existingSubscription);
-                    // no need to remove empty entry because we'll be adding subscription again below
+                    subscriptions = new HashSet<MqttSubscription>();
+                    _noWildcardSubscriptionsByTopicHash.Add(topicHash, subscriptions);
                 }
+
+                subscriptions.Add(subscription);
             }
         }
-
-        isNewSubscription = existingSubscription == null;
-        _subscriptions[topicFilter.Topic] = subscription;
-
-        // Add or re-add to topic hash dictionary
-        if (hasWildcard)
+        finally
         {
-            if (!_wildcardSubscriptionsByTopicHash.TryGetValue(topicHash, out var subscriptions))
-            {
-                subscriptions = new TopicHashMaskSubscriptions();
-                _wildcardSubscriptionsByTopicHash.Add(topicHash, subscriptions);
-            }
-
-            subscriptions.AddSubscription(subscription);
-        }
-        else
-        {
-            if (!_noWildcardSubscriptionsByTopicHash.TryGetValue(topicHash, out var subscriptions))
-            {
-                subscriptions = new HashSet<MqttSubscription>();
-                _noWildcardSubscriptionsByTopicHash.Add(topicHash, subscriptions);
-            }
-
-            subscriptions.Add(subscription);
+            _subscriptionsLock.ExitWriteLock();
         }
 
         return new CreateSubscriptionResult
@@ -368,32 +367,7 @@ public sealed class MqttClientSubscriptionsManager : IDisposable
         };
     }
 
-    // Holds the write lock once for the whole batch instead of reacquiring it per filter.
-    List<CreateSubscriptionResult> CreateSubscriptionsBatch(
-        List<(MqttTopicFilter TopicFilter, MqttSubscribeReasonCode ReasonCode)> validatedFilters,
-        uint subscriptionIdentifier)
-    {
-        var results = new List<CreateSubscriptionResult>(validatedFilters.Count);
-
-        _subscriptionsLock.EnterWriteLock();
-        try
-        {
-            foreach (var (topicFilter, reasonCode) in validatedFilters)
-            {
-                results.Add(CreateSubscriptionLocked(topicFilter, subscriptionIdentifier, reasonCode));
-            }
-        }
-        finally
-        {
-            _subscriptionsLock.ExitWriteLock();
-        }
-
-        return results;
-    }
-
-    // matchedTopics tracks retained topics already delivered for this SUBSCRIBE packet so the client
-    // receives every retained message only one time even if multiple subscriptions in the same packet match.
-    static void FilterRetainedApplicationMessagesByLookup(
+    static void FilterRetainedApplicationMessages(
         IReadOnlyDictionary<string, MqttApplicationMessage> retainedMessagesByTopic,
         CreateSubscriptionResult createSubscriptionResult,
         SubscribeResult subscribeResult,
@@ -415,21 +389,22 @@ public sealed class MqttClientSubscriptionsManager : IDisposable
 
         if (subscription.TopicHasWildcard)
         {
-            // Wildcard subscriptions must scan all retained messages.
-            foreach (var (retainedTopic, retainedMessage) in retainedMessagesByTopic)
+            // Wildcard subscriptions must scan all retained messages. Iterate in reverse to match
+            // the original (list-backward) iteration order.
+            foreach (var kvp in retainedMessagesByTopic.Reverse())
             {
-                if (matchedTopics.Contains(retainedTopic))
+                if (matchedTopics.Contains(kvp.Key))
                 {
                     continue;
                 }
 
-                if (MqttTopicFilterComparer.Compare(retainedTopic, subscription.Topic) != MqttTopicFilterCompareResult.IsMatch)
+                if (MqttTopicFilterComparer.Compare(kvp.Key, subscription.Topic) != MqttTopicFilterCompareResult.IsMatch)
                 {
                     continue;
                 }
 
-                AddRetainedMessageMatch(retainedMessage, createSubscriptionResult, subscribeResult);
-                matchedTopics.Add(retainedTopic);
+                AddRetainedMessageMatch(kvp.Value, createSubscriptionResult, subscribeResult);
+                matchedTopics.Add(kvp.Key);
             }
         }
         else
@@ -459,7 +434,11 @@ public sealed class MqttClientSubscriptionsManager : IDisposable
             retainedMessageMatch.SubscriptionQualityOfServiceLevel = retainedMessageMatch.ApplicationMessage.QualityOfServiceLevel;
         }
 
-        subscribeResult.RetainedMessages ??= new List<MqttRetainedMessageMatch>();
+        if (subscribeResult.RetainedMessages == null)
+        {
+            subscribeResult.RetainedMessages = new List<MqttRetainedMessageMatch>();
+        }
+
         subscribeResult.RetainedMessages.Add(retainedMessageMatch);
     }
 
@@ -489,7 +468,11 @@ public sealed class MqttClientSubscriptionsManager : IDisposable
 
         if (subscription.Identifier > 0)
         {
-            subscriptionIdentifiers ??= new HashSet<uint>();
+            if (subscriptionIdentifiers == null)
+            {
+                subscriptionIdentifiers = new HashSet<uint>();
+            }
+
             subscriptionIdentifiers.Add(subscription.Identifier);
         }
     }
