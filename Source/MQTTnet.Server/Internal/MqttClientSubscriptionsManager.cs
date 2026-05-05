@@ -141,6 +141,11 @@ public sealed class MqttClientSubscriptionsManager : IDisposable
     {
         ArgumentNullException.ThrowIfNull(subscribePacket);
 
+        // Snapshot retained messages before installing subscriptions to preserve the original
+        // race semantics (retained messages published during the Subscribe call are not delivered
+        // both as a live forward and as a retained-on-subscribe match).
+        var retainedMessagesByTopic = await _retainedMessagesManager.GetMessagesByTopic().ConfigureAwait(false);
+
         var result = new SubscribeResult(subscribePacket.TopicFilters.Count);
 
         var addedSubscriptions = new List<string>();
@@ -174,18 +179,13 @@ public sealed class MqttClientSubscriptionsManager : IDisposable
         // Batch-create all subscriptions under a single write lock.
         var createResults = CreateSubscriptionsBatch(validatedFilters, subscribePacket.SubscriptionIdentifier);
 
-        for (var i = 0; i < createResults.Count; i++)
-        {
-            addedSubscriptions.Add(validatedFilters[i].TopicFilter.Topic);
-            finalTopicFilters.Add(validatedFilters[i].TopicFilter);
-        }
-
-        // Use per-topic dictionary lookup for retained messages instead of O(n*m) scan.
-        var retainedMessagesByTopic = await _retainedMessagesManager.GetMessagesByTopic().ConfigureAwait(false);
         var matchedTopics = new HashSet<string>(StringComparer.Ordinal);
 
         for (var i = 0; i < createResults.Count; i++)
         {
+            addedSubscriptions.Add(validatedFilters[i].TopicFilter.Topic);
+            finalTopicFilters.Add(validatedFilters[i].TopicFilter);
+
             FilterRetainedApplicationMessagesByLookup(retainedMessagesByTopic, createResults[i], result, matchedTopics);
         }
 
@@ -329,9 +329,9 @@ public sealed class MqttClientSubscriptionsManager : IDisposable
             return;
         }
 
-        var topic = createSubscriptionResult.Subscription.Topic;
+        var subscription = createSubscriptionResult.Subscription;
 
-        if (topic.Contains('+') || topic.Contains('#'))
+        if (subscription.TopicHasWildcard)
         {
             // Wildcard subscriptions must scan all retained messages.
             foreach (var (retainedTopic, retainedMessage) in retainedMessagesByTopic)
@@ -341,7 +341,7 @@ public sealed class MqttClientSubscriptionsManager : IDisposable
                     continue;
                 }
 
-                if (MqttTopicFilterComparer.Compare(retainedTopic, topic) != MqttTopicFilterCompareResult.IsMatch)
+                if (MqttTopicFilterComparer.Compare(retainedTopic, subscription.Topic) != MqttTopicFilterCompareResult.IsMatch)
                 {
                     continue;
                 }
@@ -352,11 +352,11 @@ public sealed class MqttClientSubscriptionsManager : IDisposable
         }
         else
         {
-            // Exact topic: O(1) dictionary lookup instead of O(n) scan.
-            if (!matchedTopics.Contains(topic) && retainedMessagesByTopic.TryGetValue(topic, out var retainedMessage))
+            // Exact topic filter: O(1) dictionary lookup instead of O(n) scan.
+            if (!matchedTopics.Contains(subscription.Topic) && retainedMessagesByTopic.TryGetValue(subscription.Topic, out var retainedMessage))
             {
                 AddRetainedMessageMatch(retainedMessage, createSubscriptionResult, subscribeResult);
-                matchedTopics.Add(topic);
+                matchedTopics.Add(subscription.Topic);
             }
         }
     }
@@ -374,19 +374,6 @@ public sealed class MqttClientSubscriptionsManager : IDisposable
 
         subscribeResult.RetainedMessages ??= new List<MqttRetainedMessageMatch>();
         subscribeResult.RetainedMessages.Add(retainedMessageMatch);
-    }
-
-    CreateSubscriptionResult CreateSubscription(MqttTopicFilter topicFilter, uint subscriptionIdentifier, MqttSubscribeReasonCode reasonCode)
-    {
-        _subscriptionsLock.EnterWriteLock();
-        try
-        {
-            return CreateSubscriptionLocked(topicFilter, subscriptionIdentifier, reasonCode);
-        }
-        finally
-        {
-            _subscriptionsLock.ExitWriteLock();
-        }
     }
 
     CreateSubscriptionResult CreateSubscriptionLocked(MqttTopicFilter topicFilter, uint subscriptionIdentifier, MqttSubscribeReasonCode reasonCode)
@@ -470,60 +457,6 @@ public sealed class MqttClientSubscriptionsManager : IDisposable
             IsNewSubscription = isNewSubscription,
             Subscription = subscription
         };
-    }
-
-    static void FilterRetainedApplicationMessages(
-        IList<MqttApplicationMessage> retainedMessages,
-        CreateSubscriptionResult createSubscriptionResult,
-        SubscribeResult subscribeResult)
-    {
-        if (createSubscriptionResult.Subscription.RetainHandling == MqttRetainHandling.DoNotSendOnSubscribe)
-        {
-            // This is a MQTT V5+ feature.
-            return;
-        }
-
-        if (createSubscriptionResult.Subscription.RetainHandling == MqttRetainHandling.SendAtSubscribeIfNewSubscriptionOnly && !createSubscriptionResult.IsNewSubscription)
-        {
-            // This is a MQTT V5+ feature.
-            return;
-        }
-
-        for (var index = retainedMessages.Count - 1; index >= 0; index--)
-        {
-            var retainedMessage = retainedMessages[index];
-            if (retainedMessage == null)
-            {
-                continue;
-            }
-
-            if (MqttTopicFilterComparer.Compare(retainedMessage.Topic, createSubscriptionResult.Subscription.Topic) != MqttTopicFilterCompareResult.IsMatch)
-            {
-                continue;
-            }
-
-            var retainedMessageMatch = new MqttRetainedMessageMatch(retainedMessage, createSubscriptionResult.Subscription.GrantedQualityOfServiceLevel);
-            if (retainedMessageMatch.SubscriptionQualityOfServiceLevel > retainedMessageMatch.ApplicationMessage.QualityOfServiceLevel)
-            {
-                // UPGRADING the QoS is not allowed!
-                // From MQTT spec: Subscribing to a Topic Filter at QoS 2 is equivalent to saying
-                // "I would like to receive Messages matching this filter at the QoS with which they were published".
-                // This means a publisher is responsible for determining the maximum QoS a Message can be delivered at,
-                // but a subscriber is able to require that the Server downgrades the QoS to one more suitable for its usage.
-                retainedMessageMatch.SubscriptionQualityOfServiceLevel = retainedMessageMatch.ApplicationMessage.QualityOfServiceLevel;
-            }
-
-            if (subscribeResult.RetainedMessages == null)
-            {
-                subscribeResult.RetainedMessages = new List<MqttRetainedMessageMatch>();
-            }
-
-            subscribeResult.RetainedMessages.Add(retainedMessageMatch);
-
-            // Clear the retained message from the list because the client should receive every message only
-            // one time even if multiple subscriptions affect them.
-            retainedMessages[index] = null;
-        }
     }
 
     async Task<InterceptingSubscriptionEventArgs> InterceptSubscribe(
