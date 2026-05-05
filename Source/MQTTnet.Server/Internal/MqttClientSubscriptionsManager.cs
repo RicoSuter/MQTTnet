@@ -69,9 +69,11 @@ public sealed class MqttClientSubscriptionsManager : IDisposable
                 var subscriptionsByHashMask = wcs.Value.SubscriptionsByHashMask;
                 foreach (var shm in subscriptionsByHashMask)
                 {
-                    if ((topicHash & shm.Key) == subscriptionHash)
+                    var subscriptionHashMask = shm.Key;
+                    if ((topicHash & subscriptionHashMask) == subscriptionHash)
                     {
-                        foreach (var subscription in shm.Value)
+                        var subscriptions = shm.Value;
+                        foreach (var subscription in subscriptions)
                         {
                             if (MqttTopicFilterComparer.Compare(topic, subscription.Topic) == MqttTopicFilterCompareResult.IsMatch)
                             {
@@ -422,15 +424,14 @@ public sealed class MqttClientSubscriptionsManager : IDisposable
             grantedQualityOfServiceLevel,
             subscriptionIdentifier);
 
-        MqttTopicHash.Calculate(topicFilter.Topic, out var topicHash, out _, out var hasWildcard);
+        bool isNewSubscription;
 
-        // Add to subscriptions and maintain topic hash dictionaries.
-        var isNewSubscription = true;
+        // Add to subscriptions and maintain topic hash dictionaries
+
+        MqttTopicHash.Calculate(topicFilter.Topic, out var topicHash, out _, out var hasWildcard);
 
         if (_subscriptions.TryGetValue(topicFilter.Topic, out var existingSubscription))
         {
-            isNewSubscription = false;
-
             // must remove object from topic hash dictionary first
             if (hasWildcard)
             {
@@ -450,6 +451,7 @@ public sealed class MqttClientSubscriptionsManager : IDisposable
             }
         }
 
+        isNewSubscription = existingSubscription == null;
         _subscriptions[topicFilter.Topic] = subscription;
 
         // Add or re-add to topic hash dictionary
