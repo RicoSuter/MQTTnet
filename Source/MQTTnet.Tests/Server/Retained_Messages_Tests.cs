@@ -155,6 +155,55 @@ public class Retained_Messages_Tests : BaseTestClass
     }
 
     [TestMethod]
+    public async Task Receive_Retained_Message_With_Wildcard_Subscribe()
+    {
+        using var testEnvironment = CreateTestEnvironment();
+        await testEnvironment.StartServer();
+
+        var c1 = await testEnvironment.ConnectClient();
+        await c1.PublishAsync(new MqttApplicationMessageBuilder().WithTopic("house/1/room").WithPayload(new byte[3]).WithRetainFlag().Build());
+        await c1.PublishAsync(new MqttApplicationMessageBuilder().WithTopic("house/2/room").WithPayload(new byte[3]).WithRetainFlag().Build());
+        await c1.PublishAsync(new MqttApplicationMessageBuilder().WithTopic("garden/lights").WithPayload(new byte[3]).WithRetainFlag().Build());
+        await c1.DisconnectAsync();
+
+        var c2 = await testEnvironment.ConnectClient();
+        var messageHandler = testEnvironment.CreateApplicationMessageHandler(c2);
+
+        await c2.SubscribeAsync(new MqttTopicFilterBuilder().WithTopic("house/+/room").Build());
+
+        await Task.Delay(500);
+
+        messageHandler.AssertReceivedCountEquals(2);
+        Assert.IsTrue(messageHandler.ReceivedEventArgs.All(e => e.ApplicationMessage.Retain));
+    }
+
+    [TestMethod]
+    public async Task Receive_Retained_Message_Once_With_Multiple_Matching_Filters()
+    {
+        using var testEnvironment = CreateTestEnvironment();
+        await testEnvironment.StartServer();
+
+        var c1 = await testEnvironment.ConnectClient();
+        await c1.PublishAsync(new MqttApplicationMessageBuilder().WithTopic("a/b/c").WithPayload(new byte[3]).WithRetainFlag().Build());
+        await c1.DisconnectAsync();
+
+        var c2 = await testEnvironment.ConnectClient();
+        var messageHandler = testEnvironment.CreateApplicationMessageHandler(c2);
+
+        // Three filters in a single SUBSCRIBE that all match a/b/c — should be delivered exactly once.
+        var subscribeOptions = new MqttClientSubscribeOptionsBuilder()
+            .WithTopicFilter("a/b/c")
+            .WithTopicFilter("a/+/c")
+            .WithTopicFilter("a/#")
+            .Build();
+        await c2.SubscribeAsync(subscribeOptions);
+
+        await Task.Delay(500);
+
+        messageHandler.AssertReceivedCountEquals(1);
+    }
+
+    [TestMethod]
     public async Task Receive_Retained_Messages_From_Higher_Qos_Level()
     {
         using var testEnvironment = CreateTestEnvironment();

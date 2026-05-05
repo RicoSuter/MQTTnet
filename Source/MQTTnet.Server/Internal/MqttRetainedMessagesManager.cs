@@ -63,6 +63,14 @@ public sealed class MqttRetainedMessagesManager : IDisposable
         }
     }
 
+    internal IReadOnlyDictionary<string, MqttApplicationMessage> GetMessagesByTopic()
+    {
+        lock (_messages)
+        {
+            return new Dictionary<string, MqttApplicationMessage>(_messages);
+        }
+    }
+
     public async Task Start()
     {
         try
