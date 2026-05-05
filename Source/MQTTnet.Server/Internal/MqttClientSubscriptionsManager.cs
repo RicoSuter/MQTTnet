@@ -24,10 +24,8 @@ public sealed class MqttClientSubscriptionsManager : IDisposable
     // The additional lock is important to coordinate complex update logic with multiple steps, checks and interceptors.
     readonly Dictionary<string, MqttSubscription> _subscriptions = new Dictionary<string, MqttSubscription>();
 
-    // Use subscription lock to maintain consistency across subscriptions and topic hash dictionaries.
-    // SupportsRecursion lets CreateSubscriptionsBatch hold the write lock while calling
-    // CreateSubscription per filter (each of which re-enters the same lock).
-    readonly ReaderWriterLockSlim _subscriptionsLock = new ReaderWriterLockSlim(LockRecursionPolicy.SupportsRecursion);
+    // Use subscription lock to maintain consistency across subscriptions and topic hash dictionaries
+    readonly ReaderWriterLockSlim _subscriptionsLock = new ReaderWriterLockSlim();
     readonly Dictionary<ulong, TopicHashMaskSubscriptions> _wildcardSubscriptionsByTopicHash = new Dictionary<ulong, TopicHashMaskSubscriptions>();
 
     public MqttClientSubscriptionsManager(
@@ -281,7 +279,8 @@ public sealed class MqttClientSubscriptionsManager : IDisposable
         return result;
     }
 
-    CreateSubscriptionResult CreateSubscription(MqttTopicFilter topicFilter, uint subscriptionIdentifier, MqttSubscribeReasonCode reasonCode)
+    // Caller must hold _subscriptionsLock in write mode.
+    CreateSubscriptionResult CreateSubscriptionLocked(MqttTopicFilter topicFilter, uint subscriptionIdentifier, MqttSubscribeReasonCode reasonCode)
     {
         MqttQualityOfServiceLevel grantedQualityOfServiceLevel;
 
@@ -314,60 +313,52 @@ public sealed class MqttClientSubscriptionsManager : IDisposable
 
         // Add to subscriptions and maintain topic hash dictionaries
 
-        _subscriptionsLock.EnterWriteLock();
-        try
+        MqttTopicHash.Calculate(topicFilter.Topic, out var topicHash, out _, out var hasWildcard);
+
+        if (_subscriptions.TryGetValue(topicFilter.Topic, out var existingSubscription))
         {
-            MqttTopicHash.Calculate(topicFilter.Topic, out var topicHash, out _, out var hasWildcard);
-
-            if (_subscriptions.TryGetValue(topicFilter.Topic, out var existingSubscription))
-            {
-                // must remove object from topic hash dictionary first
-                if (hasWildcard)
-                {
-                    if (_wildcardSubscriptionsByTopicHash.TryGetValue(topicHash, out var subscriptions))
-                    {
-                        subscriptions.RemoveSubscription(existingSubscription);
-                        // no need to remove empty entry because we'll be adding subscription again below
-                    }
-                }
-                else
-                {
-                    if (_noWildcardSubscriptionsByTopicHash.TryGetValue(topicHash, out var subscriptions))
-                    {
-                        subscriptions.Remove(existingSubscription);
-                        // no need to remove empty entry because we'll be adding subscription again below
-                    }
-                }
-            }
-
-            isNewSubscription = existingSubscription == null;
-            _subscriptions[topicFilter.Topic] = subscription;
-
-            // Add or re-add to topic hash dictionary
+            // must remove object from topic hash dictionary first
             if (hasWildcard)
             {
-                if (!_wildcardSubscriptionsByTopicHash.TryGetValue(topicHash, out var subscriptions))
+                if (_wildcardSubscriptionsByTopicHash.TryGetValue(topicHash, out var subscriptions))
                 {
-                    subscriptions = new TopicHashMaskSubscriptions();
-                    _wildcardSubscriptionsByTopicHash.Add(topicHash, subscriptions);
+                    subscriptions.RemoveSubscription(existingSubscription);
+                    // no need to remove empty entry because we'll be adding subscription again below
                 }
-
-                subscriptions.AddSubscription(subscription);
             }
             else
             {
-                if (!_noWildcardSubscriptionsByTopicHash.TryGetValue(topicHash, out var subscriptions))
+                if (_noWildcardSubscriptionsByTopicHash.TryGetValue(topicHash, out var subscriptions))
                 {
-                    subscriptions = new HashSet<MqttSubscription>();
-                    _noWildcardSubscriptionsByTopicHash.Add(topicHash, subscriptions);
+                    subscriptions.Remove(existingSubscription);
+                    // no need to remove empty entry because we'll be adding subscription again below
                 }
-
-                subscriptions.Add(subscription);
             }
         }
-        finally
+
+        isNewSubscription = existingSubscription == null;
+        _subscriptions[topicFilter.Topic] = subscription;
+
+        // Add or re-add to topic hash dictionary
+        if (hasWildcard)
         {
-            _subscriptionsLock.ExitWriteLock();
+            if (!_wildcardSubscriptionsByTopicHash.TryGetValue(topicHash, out var subscriptions))
+            {
+                subscriptions = new TopicHashMaskSubscriptions();
+                _wildcardSubscriptionsByTopicHash.Add(topicHash, subscriptions);
+            }
+
+            subscriptions.AddSubscription(subscription);
+        }
+        else
+        {
+            if (!_noWildcardSubscriptionsByTopicHash.TryGetValue(topicHash, out var subscriptions))
+            {
+                subscriptions = new HashSet<MqttSubscription>();
+                _noWildcardSubscriptionsByTopicHash.Add(topicHash, subscriptions);
+            }
+
+            subscriptions.Add(subscription);
         }
 
         return new CreateSubscriptionResult
@@ -377,9 +368,7 @@ public sealed class MqttClientSubscriptionsManager : IDisposable
         };
     }
 
-    // Holds the write lock once for the whole batch; CreateSubscription's inner Enter/Exit then
-    // recurses harmlessly (LockRecursionPolicy.SupportsRecursion). This avoids reacquiring
-    // the lock per filter for large SUBSCRIBE packets.
+    // Holds the write lock once for the whole batch instead of reacquiring it per filter.
     List<CreateSubscriptionResult> CreateSubscriptionsBatch(
         List<(MqttTopicFilter TopicFilter, MqttSubscribeReasonCode ReasonCode)> validatedFilters,
         uint subscriptionIdentifier)
@@ -391,7 +380,7 @@ public sealed class MqttClientSubscriptionsManager : IDisposable
         {
             foreach (var (topicFilter, reasonCode) in validatedFilters)
             {
-                results.Add(CreateSubscription(topicFilter, subscriptionIdentifier, reasonCode));
+                results.Add(CreateSubscriptionLocked(topicFilter, subscriptionIdentifier, reasonCode));
             }
         }
         finally
